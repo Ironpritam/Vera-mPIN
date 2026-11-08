@@ -1,0 +1,26 @@
+Vera mPIN - Third-party software notices
+
+Vera mPIN bundles the official VeraCrypt 1.26.24 Windows x64 executable
+(VeraCrypt-x64.exe), digitally signed by IDRIX SARL.
+SHA-256: A6362385846A54D2822AC3E1C502BC1DF9136F54820BE4A38AE7A4575C0ADB2F
+
+VeraCrypt is distributed under the GNU General Public License, version 3.
+The typical installer includes the corresponding VeraCrypt 1.26.24 source
+archive in the application's ThirdParty folder. The source archive contains
+the applicable license and notices.
+Source archive SHA-256:
+A568F964146DFD3A18CF4010E310FF0B7E11A34AD1383424FC533869750FA49B
+
+The corresponding source is also available from the official VeraCrypt
+release page:
+https://github.com/veracrypt/VeraCrypt/releases/tag/VeraCrypt_1.26.24
+
+Official project and license information:
+https://www.veracrypt.fr/en/License.html
+https://www.veracrypt.fr/en/Code.html
+
+The .NET runtime distributed with Vera mPIN is covered by the Microsoft .NET
+license and third-party notices installed in the Licenses folder.
+
+Vera mPIN and VeraCrypt are separate programs. Vera mPIN launches the bundled
+VeraCrypt executable to perform volume operations.

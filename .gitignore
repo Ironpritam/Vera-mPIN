@@ -1,0 +1,5 @@
+.vs/
+**/bin/
+**/obj/
+src/VeraMPIN/artifacts/
+*.csproj.user

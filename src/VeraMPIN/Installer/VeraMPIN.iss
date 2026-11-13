@@ -1,5 +1,5 @@
 #define AppName "Vera mPIN"
-#define AppVersion "1.0.1"
+#define AppVersion "1.0.3"
 #define AppExeName "VeraMPIN.exe"
 #define PayloadDir "..\artifacts\VeraMPIN-InstallerPayload"
 

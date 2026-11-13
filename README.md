@@ -18,7 +18,7 @@ Vera mPIN helps you add, mount, and dismount VeraCrypt container files and disk 
 
 ## Get the app
 
-The current release is **1.0.1**. Download and run the [Vera mPIN x64 installer](./Releases/VeraMPIN-Setup-1.0.1-x64.exe). It is self-contained and does not require a separate .NET Desktop Runtime installation.
+The current release is **1.0.3**. Download and run the [Vera mPIN x64 installer](./Releases/VeraMPIN-Setup-1.0.3-x64.exe). It is self-contained and does not require a separate .NET Desktop Runtime installation.
 
 The per-user installer offers typical and compact installation options. The typical option includes the corresponding VeraCrypt source archive; the compact option omits that archive. The installer does not install VeraCrypt system-wide, mount a volume, or modify disk partitions.
 
@@ -76,6 +76,8 @@ The installer build script checks the VeraCrypt executable's version and Authent
 5. Use **Dismount selected** for a volume managed by Vera mPIN. **Dismount all** attempts a normal dismount of every volume tracked by the app. Use **Dismount a VeraCrypt volume...** to choose a volume mounted directly in VeraCrypt.
 
 The app does not force-dismount volumes. **Dismount all** only covers app-managed volumes; volumes mounted outside the app must be selected through the separate VeraCrypt-volume action.
+
+At startup and every 30 seconds, Vera mPIN checks saved mount status against the current drive and recorded volume identity. Use **Refresh status** to check immediately. When a check finds a stale status or cannot verify a volume, the app shows a warning. If Windows or VeraCrypt already unmounted a volume (for example, after a restart), the app clears that stale status so the entry can be mounted again. If a drive letter is occupied by a different volume, it leaves that volume untouched and can choose another available letter. **Remove mPIN...** opens choices to remove the selected entry's saved password or all saved mPIN passwords.
 
 ### Partition-selection caution
 

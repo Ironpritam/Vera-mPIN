@@ -25,6 +25,14 @@ internal sealed class MountProfile
     public long? MountedVolumeSize { get; set; }
     public string? MountedVolumeLabel { get; set; }
 
+    public void ClearMountedState()
+    {
+        MountedLetter = null;
+        MountedVolumeSerial = null;
+        MountedVolumeSize = null;
+        MountedVolumeLabel = null;
+    }
+
     [JsonIgnore]
     public bool HasMpin => SecretStore.Exists(Id);
 

@@ -97,6 +97,7 @@ public partial class MainForm : Form
     private readonly Button _addPartitionButton;
     private readonly Button _addContainerButton;
     private readonly Button _identifyButton;
+    private readonly Button _refreshMountStatusButton;
     private readonly Button _mountButton;
     private readonly Button _lockButton;
     private readonly Button _dismountAllButton;
@@ -104,8 +105,10 @@ public partial class MainForm : Form
     private readonly Button _credentialButton;
     private readonly Button _removeMpinButton;
     private readonly Button _externalDismountButton;
+    private readonly System.Windows.Forms.Timer _mountStatusTimer = new() { Interval = 30_000 };
     private bool _refreshingMountLetters;
     private bool _busy;
+    private string? _lastAutomaticRefreshWarning;
     private int _pressedSelectedProfileRow = -1;
     private Guid? _outlinedProfileId;
 
@@ -132,6 +135,7 @@ public partial class MainForm : Form
         _addPartitionButton = CreateButton("Add a partition", Color.White, Teal, 170);
         _addContainerButton = CreateButton("Add a VeraCrypt file", Color.White, Teal, 184);
         _identifyButton = CreateButton("Identify this SSD", Color.White, Teal, 158);
+        _refreshMountStatusButton = CreateButton("Refresh status", Color.White, Teal, 142);
         _mountButton = CreateButton("Mount selected", Teal, Color.White, 164);
         _lockButton = CreateButton("Dismount selected", Red, Color.White, 178);
         _dismountAllButton = CreateButton("Dismount all", Red, Color.White, 150);
@@ -185,6 +189,7 @@ public partial class MainForm : Form
         sourceActions.Controls.Add(_addPartitionButton);
         sourceActions.Controls.Add(_addContainerButton);
         sourceActions.Controls.Add(_identifyButton);
+        sourceActions.Controls.Add(_refreshMountStatusButton);
         sourceActions.Controls.Add(_externalDismountButton);
 
         var listHost = new Panel
@@ -336,6 +341,7 @@ public partial class MainForm : Form
         _addPartitionButton.Click += AddPartitionButton_Click;
         _addContainerButton.Click += AddContainerButton_Click;
         _identifyButton.Click += IdentifyButton_Click;
+        _refreshMountStatusButton.Click += RefreshMountStatusButton_Click;
         _mountButton.Click += MountButton_Click;
         _lockButton.Click += LockButton_Click;
         _dismountAllButton.Click += DismountAllButton_Click;
@@ -344,6 +350,8 @@ public partial class MainForm : Form
         _removeMpinButton.Click += RemoveMpinButton_Click;
         _externalDismountButton.Click += ExternalDismountButton_Click;
         _mountLetterComboBox.SelectedIndexChanged += MountLetterComboBox_SelectedIndexChanged;
+        _mountStatusTimer.Tick += MountStatusTimer_Tick;
+        FormClosed += (_, _) => _mountStatusTimer.Dispose();
         _mountLetterComboBox.DropDown += (_, _) =>
         {
             try
@@ -361,8 +369,11 @@ public partial class MainForm : Form
             WireSelectionClearing(control);
         }
 
+        var mountStateStatus = ReconcileMountedState(out var staleMountsCleared);
         RefreshProfileList(null);
-        SetStatus("Add one or more VeraCrypt sources to get started.", Muted);
+        SetStatus(
+            mountStateStatus ?? "Add one or more VeraCrypt sources to get started.",
+            mountStateStatus is null ? Muted : Color.FromArgb(151, 91, 32));
         try
         {
             RefreshMountLetterChoices();
@@ -371,6 +382,18 @@ public partial class MainForm : Form
         {
             SetStatus($"Could not scan available mount letters: {exception.Message}", Red);
         }
+
+        if (staleMountsCleared)
+        {
+            MessageBox.Show(
+                this,
+                mountStateStatus,
+                "Mount status refreshed",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+
+        _mountStatusTimer.Start();
     }
 
     private static Button CreateButton(string text, Color backColor, Color foreColor, int width) => new()
@@ -526,6 +549,8 @@ public partial class MainForm : Form
         _controlToolTip.SetToolTip(_addPartitionButton, "Browse partitions on all connected disks and save one as a mount entry.");
         _controlToolTip.SetToolTip(_addContainerButton, "Choose and save a VeraCrypt container file.");
         _controlToolTip.SetToolTip(_identifyButton, "Find the largest other partition on the USB drive containing this app.");
+        _controlToolTip.SetToolTip(_refreshMountStatusButton,
+            "Check saved mounted entries against the current drive letters and volume identities. Vera mPIN also checks automatically every 30 seconds.");
         _controlToolTip.SetToolTip(_externalDismountButton,
             "Choose a drive letter and ask VeraCrypt to dismount it, including volumes mounted outside this app. Verify the letter in VeraCrypt first.");
         _controlToolTip.SetToolTip(_mountButton, "Mount the selected saved entry, using its preferred drive letter when available.");
@@ -761,6 +786,142 @@ public partial class MainForm : Form
         UpdateSelectedProfile();
     }
 
+    private string? ReconcileMountedState(out bool staleStateCleared)
+    {
+        staleStateCleared = false;
+        var settings = LoadSettings();
+        var staleMounts = new List<(MountProfile Profile, MountedVolume? CurrentVolume)>();
+        var warnings = new List<string>();
+
+        foreach (var profile in settings.Profiles.Where(item => item.MountedLetter is not null))
+        {
+            try
+            {
+                var currentVolume = VeraCryptService.GetMountedVolume(profile.MountedLetter!.Value);
+                if (currentVolume is null || !IsConfiguredVolume(profile, currentVolume))
+                {
+                    staleMounts.Add((profile, currentVolume));
+                    profile.ClearMountedState();
+                }
+            }
+            catch (Exception exception) when (
+                exception is IOException or InvalidOperationException or UnauthorizedAccessException)
+            {
+                warnings.Add(
+                    $"Could not verify “{profile.Name}” at {profile.MountedLetter}: {exception.Message}");
+            }
+        }
+
+        if (staleMounts.Count > 0)
+        {
+            try
+            {
+                SaveSettings(settings);
+                staleStateCleared = true;
+                warnings.AddRange(staleMounts.Select(item => item.CurrentVolume is null
+                    ? $"Cleared the stale mounted status for “{item.Profile.Name}”; its drive is no longer mounted."
+                    : $"Cleared the stale mounted status for “{item.Profile.Name}”; its recorded drive letter now belongs to a different volume."));
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException)
+            {
+                warnings.Add($"Could not save refreshed mount status: {exception.Message}");
+            }
+        }
+
+        return warnings.Count == 0 ? null : string.Join(Environment.NewLine, warnings);
+    }
+
+    private void RefreshMountStatusButton_Click(object? sender, EventArgs e)
+    {
+        if (_busy)
+        {
+            return;
+        }
+
+        try
+        {
+            var selectedId = SelectedProfile?.Id;
+            var warning = ReconcileMountedState(out var staleStateCleared);
+            if (staleStateCleared)
+            {
+                RefreshProfileList(selectedId);
+            }
+
+            var status = warning ?? "Mount status checked. No stale mount entries were found.";
+            SetStatus(status, warning is null ? Teal : Color.FromArgb(151, 91, 32));
+            if (warning is not null)
+            {
+                MessageBox.Show(
+                    this,
+                    warning,
+                    "Mount status refresh",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+        }
+        catch (Exception exception)
+        {
+            var message = $"Could not refresh mount status: {exception.Message}";
+            SetStatus(message, Red);
+            MessageBox.Show(this, message, "Mount status refresh failed",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void MountStatusTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_busy || IsDisposed || !Visible)
+        {
+            return;
+        }
+
+        try
+        {
+            var selectedId = SelectedProfile?.Id;
+            var warning = ReconcileMountedState(out var staleStateCleared);
+            if (staleStateCleared)
+            {
+                RefreshProfileList(selectedId);
+            }
+
+            if (warning is null)
+            {
+                _lastAutomaticRefreshWarning = null;
+                return;
+            }
+
+            SetStatus(warning, Color.FromArgb(151, 91, 32));
+            if (string.Equals(warning, _lastAutomaticRefreshWarning, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _lastAutomaticRefreshWarning = warning;
+            MessageBox.Show(
+                this,
+                warning,
+                "Mount status changed",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+        catch (Exception exception)
+        {
+            var warning = $"Automatic mount-status check failed: {exception.Message}";
+            SetStatus(warning, Red);
+            if (!string.Equals(warning, _lastAutomaticRefreshWarning, StringComparison.Ordinal))
+            {
+                _lastAutomaticRefreshWarning = warning;
+                MessageBox.Show(
+                    this,
+                    warning,
+                    "Mount status check failed",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+    }
+
     private void UpdateSelectedProfile()
     {
         var profile = SelectedProfile;
@@ -810,6 +971,26 @@ public partial class MainForm : Form
         SetStatus($"Preparing to mount “{profile.Name}”…", Muted);
         try
         {
+            if (profile.MountedLetter is char currentLetter)
+            {
+                var existing = VeraCryptService.GetMountedVolume(currentLetter);
+                if (existing is not null && IsConfiguredVolume(profile, existing))
+                {
+                    SetStatus($"“{profile.Name}” is already mounted at {currentLetter}:", Teal);
+                    return;
+                }
+
+                profile.ClearMountedState();
+                SaveProfile(profile);
+                RefreshProfileList(profile.Id);
+                if (existing is not null)
+                {
+                    SetStatus(
+                        $"Cleared stale mount tracking for “{profile.Name}”. Drive {currentLetter}: belongs to a different volume; another available letter will be used.",
+                        Color.FromArgb(151, 91, 32));
+                }
+            }
+
             var sourcePath = profile.SourceType switch
             {
                 MountSourceType.Partition => (await DiskInventory.ResolveConfiguredTargetAsync(profile)).DevicePath,
@@ -819,26 +1000,6 @@ public partial class MainForm : Form
                     throw new FileNotFoundException("The saved container is missing. Remove this entry and add the file from its current location.", profile.ContainerPath),
                 _ => throw new InvalidOperationException("The saved mount source type is not supported.")
             };
-
-            if (profile.MountedLetter is char currentLetter)
-            {
-                var existing = VeraCryptService.GetMountedVolume(currentLetter);
-                if (existing is not null)
-                {
-                    if (IsConfiguredVolume(profile, existing))
-                    {
-                        SetStatus($"“{profile.Name}” is already mounted at {currentLetter}:", Teal);
-                        return;
-                    }
-
-                    throw new InvalidOperationException($"Drive {currentLetter}: is occupied by a volume that does not match this mount entry. Refusing to mount over it.");
-                }
-
-                profile.MountedLetter = null;
-                profile.MountedVolumeSerial = null;
-                profile.MountedVolumeSize = null;
-                profile.MountedVolumeLabel = null;
-            }
 
             var mountLetter = VeraCryptService.FindAvailableMountLetter(profile.PreferredMountLetter);
             string? password = null;
@@ -888,20 +1049,30 @@ public partial class MainForm : Form
         SetStatus($"Checking “{profile.Name}” before dismount…", Muted);
         try
         {
-            if (profile.SourceType == MountSourceType.Partition)
-            {
-                await DiskInventory.ResolveConfiguredTargetAsync(profile);
-            }
-
             var volume = VeraCryptService.GetMountedVolume(mountLetter);
             if (volume is null)
             {
-                throw new InvalidOperationException($"The app-managed volume is no longer present at {mountLetter}:; its saved state was kept for safety.");
+                profile.ClearMountedState();
+                SaveProfile(profile);
+                RefreshProfileList(profile.Id);
+                SetStatus($"The volume was already unmounted. Cleared its stale status for “{profile.Name}”.", Color.FromArgb(151, 91, 32));
+                return;
             }
 
             if (!IsConfiguredVolume(profile, volume))
             {
-                throw new InvalidOperationException($"Drive {mountLetter}: does not match the volume previously verified by this app. Refusing to dismount it.");
+                profile.ClearMountedState();
+                SaveProfile(profile);
+                RefreshProfileList(profile.Id);
+                SetStatus(
+                    $"Drive {mountLetter}: is a different volume. Cleared stale tracking for “{profile.Name}”; nothing was dismounted.",
+                    Color.FromArgb(151, 91, 32));
+                return;
+            }
+
+            if (profile.SourceType == MountSourceType.Partition)
+            {
+                await DiskInventory.ResolveConfiguredTargetAsync(profile);
             }
 
             var answer = MessageBox.Show(
@@ -916,10 +1087,7 @@ public partial class MainForm : Form
 
             using var process = VeraCryptService.StartDismount(mountLetter);
             await VeraCryptService.WaitForDismountAsync(mountLetter, volume, process, TimeSpan.FromSeconds(30));
-            profile.MountedLetter = null;
-            profile.MountedVolumeSerial = null;
-            profile.MountedVolumeSize = null;
-            profile.MountedVolumeLabel = null;
+            profile.ClearMountedState();
             SaveProfile(profile);
             RefreshProfileList(profile.Id);
             SetStatus($"Dismounted “{profile.Name}”.", Teal);
@@ -965,6 +1133,7 @@ public partial class MainForm : Form
 
         SetBusy(true);
         var dismounted = new List<string>();
+        var staleMountsCleared = new List<string>();
         var failures = new List<string>();
         var stoppedAfterCancellation = false;
         try
@@ -975,16 +1144,26 @@ public partial class MainForm : Form
                 var mountLetter = profile.MountedLetter!.Value;
                 try
                 {
+                    var volume = VeraCryptService.GetMountedVolume(mountLetter);
+                    if (volume is null)
+                    {
+                        profile.ClearMountedState();
+                        SaveProfile(profile);
+                        staleMountsCleared.Add($"{profile.Name} (already unmounted)");
+                        continue;
+                    }
+
+                    if (!IsConfiguredVolume(profile, volume))
+                    {
+                        profile.ClearMountedState();
+                        SaveProfile(profile);
+                        staleMountsCleared.Add($"{profile.Name} (drive letter belongs to another volume; left it untouched)");
+                        continue;
+                    }
+
                     if (profile.SourceType == MountSourceType.Partition)
                     {
                         await DiskInventory.ResolveConfiguredTargetAsync(profile);
-                    }
-
-                    var volume = VeraCryptService.GetMountedVolume(mountLetter)
-                        ?? throw new InvalidOperationException($"Drive {mountLetter}: is no longer present; saved state was kept.");
-                    if (!IsConfiguredVolume(profile, volume))
-                    {
-                        throw new InvalidOperationException($"Drive {mountLetter}: does not match the volume recorded by Vera mPIN.");
                     }
 
                     SetStatus($"Dismounting “{profile.Name}” at {mountLetter}: …", Muted);
@@ -992,10 +1171,7 @@ public partial class MainForm : Form
                     await VeraCryptService.WaitForDismountAsync(
                         mountLetter, volume, process, TimeSpan.FromSeconds(30));
 
-                    profile.MountedLetter = null;
-                    profile.MountedVolumeSerial = null;
-                    profile.MountedVolumeSize = null;
-                    profile.MountedVolumeLabel = null;
+                    profile.ClearMountedState();
                     SaveProfile(profile);
                     dismounted.Add(profile.Name);
                 }
@@ -1013,19 +1189,37 @@ public partial class MainForm : Form
             }
 
             RefreshProfileList(null);
-            if (failures.Count == 0)
+            if (failures.Count == 0 && staleMountsCleared.Count == 0)
             {
                 SetStatus($"Dismounted all {dismounted.Count} Vera mPIN-managed volumes.", Teal);
+            }
+            else if (failures.Count == 0)
+            {
+                SetStatus(
+                    $"Dismounted {dismounted.Count} volume(s) and cleared stale status for {staleMountsCleared.Count} entry/entries.",
+                    Color.FromArgb(151, 91, 32));
+                MessageBox.Show(
+                    this,
+                    $"Dismounted: {dismounted.Count}\nStale mount status cleared: {staleMountsCleared.Count}\n\n{string.Join(Environment.NewLine, staleMountsCleared)}",
+                    "Mount status refreshed",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
             }
             else
             {
                 var resultSummary = stoppedAfterCancellation
                     ? $"Dismounted {dismounted.Count} volume(s); the operation stopped after cancellation."
                     : $"Dismounted {dismounted.Count} volume(s); {failures.Count} could not be dismounted.";
+                if (staleMountsCleared.Count > 0)
+                {
+                    resultSummary += $" Cleared stale status for {staleMountsCleared.Count} entry/entries.";
+                }
                 SetStatus(resultSummary, Red);
                 MessageBox.Show(
                     this,
-                    $"Dismounted: {dismounted.Count}\nCould not dismount: {failures.Count}\n\n{string.Join(Environment.NewLine, failures)}",
+                    $"Dismounted: {dismounted.Count}\nStale mount status cleared: {staleMountsCleared.Count}\nCould not dismount: {failures.Count}\n\n" +
+                    (staleMountsCleared.Count == 0 ? "" : $"{string.Join(Environment.NewLine, staleMountsCleared)}{Environment.NewLine}{Environment.NewLine}") +
+                    string.Join(Environment.NewLine, failures),
                     "Some volumes were not dismounted",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
@@ -1151,10 +1345,11 @@ public partial class MainForm : Form
         _busyProgress.MarqueeAnimationSpeed = busy ? 28 : 0;
         SetSourceButtonsEnabled(!busy);
         _externalDismountButton.Enabled = !busy;
+        _refreshMountStatusButton.Enabled = !busy;
         _dismountAllButton.Enabled = !busy && LoadSettings().Profiles.Any(item => item.MountedLetter is not null);
         _profilesGrid.Enabled = !busy;
         _credentialButton.Enabled = !busy;
-        _removeMpinButton.Enabled = !busy && SelectedProfile?.HasMpin == true;
+        _removeMpinButton.Enabled = !busy && SecretStore.AnyExists(LoadSettings().Profiles);
         UpdateSelectedProfile();
     }
 
@@ -1197,7 +1392,8 @@ public partial class MainForm : Form
         }
 
         var settings = LoadSettings();
-        using var menu = new ContextMenuStrip();
+        var menu = new ContextMenuStrip();
+        menu.Closed += (_, _) => menu.Dispose();
         if (SelectedProfile is MountProfile selected && selected.HasMpin)
         {
             menu.Items.Add($"Remove mPIN for “{selected.Name}”", null, (_, _) => RemoveSelectedMpin(selected));
@@ -1206,6 +1402,13 @@ public partial class MainForm : Form
         if (SecretStore.AnyExists(settings.Profiles))
         {
             menu.Items.Add("Remove mPIN for all volumes...", null, (_, _) => RemoveAllMpin(settings.Profiles));
+        }
+
+        if (menu.Items.Count == 0)
+        {
+            menu.Dispose();
+            SetStatus("There are no saved mPIN credentials to remove.", Muted);
+            return;
         }
 
         menu.Show(_removeMpinButton, new Point(0, _removeMpinButton.Height));
